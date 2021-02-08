@@ -4,6 +4,7 @@
 # Build 
 mkdir catkin_ws/src
 cd catkin_ws/src
+sudo apt-get install python-pyx
 git clone git@github.com:wxm030/kalibr.git
 cd ..
 catkin init
