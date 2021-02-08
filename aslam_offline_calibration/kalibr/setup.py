@@ -18,6 +18,7 @@ setup_args = generate_distutils_setup(
              'python/kalibr_camera_focus',
              'python/kalibr_camera_validator',
              'python/kalibr_create_target_pdf',
+             'python/kalibr_extract_msg',
              'python/kalibr_visualize_calibration',
              'python/kalibr_visualize_distortion',
              'python/exporters/kalibr_maplab_config',
