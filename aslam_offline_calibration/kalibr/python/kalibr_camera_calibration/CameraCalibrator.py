@@ -107,7 +107,7 @@ class TargetDetector(object):
         elif targetType == 'aprilgrid':
             options = acv_april.AprilgridOptions()
             #enforce more than one row --> pnp solution can be bad if all points are almost on a line...
-            options.minTagsForValidObs = int( np.max( [targetParams['tagRows'], targetParams['tagCols']] ) + 1 )
+            options.minTagsForValidObs = 7 #int( np.max( [targetParams['tagRows'], targetParams['tagCols']] ) + 1 )
             options.showExtractionVideo = showCorners
             
             self.grid = acv_april.GridCalibrationTargetAprilgrid(targetParams['tagRows'], 
