@@ -280,7 +280,16 @@ class RsCalibrator(object):
         # add all the landmarks once
         landmarks = []
         landmarks_expr = []
-        for landmark in self.__observations[0].getCornersTargetFrame():
+        #for landmark in self.__observations[0].getCornersTargetFrame():
+        max_landmark_num = 0;
+        max_landmark_id = 0;
+        for i in range(len(self.__observations)):
+            landmark = self.__observations[i].getCornersTargetFrame()
+            if (len(landmark) > max_landmark_num):
+                max_landmark_num = len(landmark)
+                max_landmark_id = i
+        # print "max_landmark_id/num", (max_landmark_id, max_landmark_num)
+        for landmark in self.__observations[max_landmark_id].getCornersTargetFrame():
             # design variable for landmark
             landmark_w_dv = aopt.HomogeneousPointDv(sm.toHomogeneous(landmark))
             landmark_w_dv.setActive(self.__config.estimateParameters['landmarks']);
