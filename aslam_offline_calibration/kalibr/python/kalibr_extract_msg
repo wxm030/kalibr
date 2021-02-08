@@ -1,0 +1,304 @@
+#!/usr/bin/env python
+print "importing libraries"
+
+import kalibr_common as kc
+
+
+import cv2
+import csv
+import os
+import sys
+import argparse
+import sm
+
+import rosbag
+import numpy as np
+import urllib
+import rospy
+import ImageFile
+from sensor_msgs.msg import Image
+from sensor_msgs.msg import Imu
+from geometry_msgs.msg import Vector3Stamped
+
+try:
+    import cv
+    png_flag = cv.CV_IMWRITE_PNG_COMPRESSION
+except ImportError:    
+    png_flag = cv2.IMWRITE_PNG_COMPRESSION
+
+
+from multiprocessing import Process, Manager, Queue, cpu_count, queues
+
+queue = Queue()
+manager = Manager()
+converted_imgs = manager.list()
+
+
+
+#setup the argument list
+parser = argparse.ArgumentParser(description='Extract a ROS bag containing a image and imu topics.')
+parser.add_argument('--bag', metavar='bag', help='ROS bag file')
+parser.add_argument('--image-topics',  metavar='image_topics', nargs='+', help='Image topics %(default)s')
+#parser.add_argument('--output-folder',  metavar='output_folder', nargs='?', default="output", help='Output folder %(default)s')
+parser.add_argument('--output-bag', metavar='output_bag',  default="output.bag", help='ROS bag file %(default)s')
+
+#print help if no argument is specified
+if len(sys.argv)<2:
+    parser.print_help()
+    sys.exit(0)
+
+#parse the args
+parsed = parser.parse_args()
+
+if parsed.image_topics is None and parsed.imu_topics is None:
+    print "ERROR: Need at least one camera or IMU topic."
+    sys.exit(-1)
+
+#create output folder
+try:
+  os.makedirs(parsed.output_folder)
+except:
+  pass
+
+
+def createAcclMessge(timestamp, alpha0,alpha1,alpha2):
+    timestamp_int = str(timestamp)
+    timestamp_int = int(timestamp_int)
+    timestamp_int = 1903000000000000000 + timestamp_int
+    timestamp_int = str(timestamp_int)
+
+    timestamp_int = timestamp_int.zfill(19)
+    timestamp_nsecs = str(timestamp_int)
+    timestamp = rospy.Time( int(timestamp_nsecs[0:-9]), int(timestamp_nsecs[-9:]) )
+
+    rosAccl=Vector3Stamped()
+    rosAccl.header.stamp = timestamp
+    rosAccl.vector.x = float(alpha0)
+    rosAccl.vector.y = float(alpha1)
+    rosAccl.vector.z = float(alpha2)
+    
+    return rosAccl,timestamp
+
+def createGyroMessge( timestamp, omega0,omega1,omega2):
+
+    timestamp_int = str(timestamp)
+    timestamp_int = int(timestamp_int)
+    timestamp_int = 1903000000000000000 + timestamp_int
+    timestamp_int = str(timestamp_int)
+
+    timestamp_int = timestamp_int.zfill(19)
+    timestamp_nsecs = str(timestamp_int)
+    timestamp = rospy.Time( int(timestamp_nsecs[0:-9]), int(timestamp_nsecs[-9:]) )
+
+    rosGyro=Vector3Stamped()
+    rosGyro.header.stamp = timestamp
+    rosGyro.vector.x = float(omega0)
+    rosGyro.vector.y = float(omega1)
+    rosGyro.vector.z = float(omega2)
+    
+    return rosGyro,timestamp
+
+def createImuMessge(timestamp_int, omega0,omega1,omega2, alpha0,alpha1,alpha2):
+    timestamp_int = str(timestamp_int)
+
+    timestamp_int = int(timestamp_int)
+    timestamp_int = 1903000000000000000 + timestamp_int
+    timestamp_int = str(timestamp_int)
+
+    timestamp_int = timestamp_int.zfill(19)     #############
+    timestamp_nsecs = str(timestamp_int)
+    timestamp = rospy.Time( int(timestamp_nsecs[0:-9]), int(timestamp_nsecs[-9:]) )
+    
+    rosimu = Imu()
+    rosimu.header.stamp = timestamp
+    rosimu.angular_velocity.x = float(omega0)
+    rosimu.angular_velocity.y = float(omega1)
+    rosimu.angular_velocity.z = float(omega2)
+    rosimu.linear_acceleration.x = float(alpha0)
+    rosimu.linear_acceleration.y = float(alpha1)
+    rosimu.linear_acceleration.z = float(alpha2)
+    
+    return rosimu, timestamp
+
+def loadImageToRosMsg(time_stamp, img):
+    image_np = img #cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
+
+    timestamp_nsecs = str(time_stamp)
+    #timestamp_nsecs = int(timestamp_nsecs)
+    timestamp_nsecs = timestamp_nsecs.zfill(19)   #############
+
+    timestamp_nsecs = int(timestamp_nsecs)
+    timestamp_nsecs = 1903000000000000000 + timestamp_nsecs
+    timestamp_nsecs = str(timestamp_nsecs)
+
+    #timestamp_nsecs = str(timestamp_nsecs)
+    timestamp = rospy.Time( secs=int(timestamp_nsecs[0:-9]), nsecs=int(timestamp_nsecs[-9:]) )
+
+    rosimage = Image()
+    rosimage.header.stamp = timestamp
+    rosimage.height = image_np.shape[0]
+    rosimage.width = image_np.shape[1]
+    rosimage.step = rosimage.width  #only with mono8! (step = width * byteperpixel * numChannels)
+    #rosimage.step = rosimage.width*3
+    rosimage.encoding = "mono8"
+    #rosimage.encoding = "rgb8"
+    rosimage.data = image_np.tostring()
+    
+    return rosimage, timestamp
+
+def getCamFoldersFromDir(dir):
+    '''Generates a list of all folders that start with cam e.g. cam0'''
+    cam_folders = list()
+    if os.path.exists(dir):
+        for path, folders, files in os.walk(dir):
+            for folder in folders:                
+                if folder[0:3] == "cam":
+                    cam_folders.append(folder)
+    return cam_folders
+
+def getImuCsvFiles(dir):
+    '''Generates a list of all csv files that start with imu'''
+    imu_files = list()
+    if os.path.exists(dir):
+        for path, folders, files in os.walk(dir):
+            for file in files:
+                if file[0:3] == 'imu' and os.path.splitext(file)[1] == ".csv":
+                    imu_files.append( os.path.join( path, file ) )
+    
+    return imu_files
+
+
+
+
+
+
+
+def creat_decompressMsg(img_total):
+    global queue
+    global converted_imgs
+
+    while not queue.empty():
+        topic, msg, t = queue.get()
+
+        de_msg = Image()
+        nparr = np.fromstring(msg.data, np.uint8)
+        img_decode =  cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        image_msg, timestamp = loadImageToRosMsg(t, img_decode)
+        # de_msg.data = image_msg
+        # de_msg.header.stamp = timestamp
+
+        # converted_imgs.append((topic, de_msg))
+        converted_imgs.append((topic, image_msg, timestamp))
+
+
+#bag_w = rosbag.Bag('imu_w.bag', 'w')
+bag_w = rosbag.Bag(parsed.output_bag, 'w')
+
+# prepare progess bar
+iProgress = sm.Progress2(1)
+
+camera_image_topics = {
+    '/cam0/image_raw'
+}
+
+for topic, msg, t in rosbag.Bag(parsed.bag).read_messages():
+    if topic not in camera_image_topics:
+        t.secs = 1903000000 + t.secs
+	msg.header.stamp.secs = 1903000000 + msg.header.stamp.secs
+	#print msg.header.stamp
+        # print t
+        bag_w.write(topic,msg,t)
+    else:
+        # print topic
+        # print t
+        # print msg.header.stamp
+        # print msg
+        queue.put((topic,msg,msg.header.stamp))
+
+
+
+img_total = queue.qsize()
+
+processes = []
+for cpu_num in xrange(cpu_count()):
+    p = Process(target=creat_decompressMsg, args=(img_total,))
+    processes.append(p)
+for p in processes:
+    p.start()
+
+
+for p in processes:
+    p.join()
+
+# for topic, msg in converted_imgs:
+#     print topic
+#     print msg
+#     bag_w.write(topic, msg, msg.header.stamp)
+
+
+for topic, msg, timestamp in converted_imgs:
+    #print topic
+    #print msg
+    bag_w.write(topic, msg, timestamp)
+
+# bag_w.write("/cam0/image_raw", image_msg, timestamp)
+
+
+
+bag_w.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+# #extract images
+# if parsed.image_topics is not None:
+#     for cidx, topic in enumerate(parsed.image_topics):
+#       bag_one = rosbag.Bag(parsed.bag)
+
+#       #camfolder = getCamFoldersFromDir(parsed.output_folder)
+#       for topic, msg, t in bag_one.read_messages(topics=['/cam0/image_raw']):
+
+#         bag_one = rosbag.Bag(parsed.bag)
+#         if msg.format.find("jpeg")!=-1:
+#           nparr = np.fromstring(msg.data, np.uint8)
+#           img_decode = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+#           #img_decode = cv2.imdecode(nparr, cv2.IMREAD_COLOR) 
+#           image_msg, timestamp = loadImageToRosMsg(t, img_decode)
+#           #bag_w.write("/{0}/image_raw".format(camfolder), image_msg, timestamp)
+#           bag_w.write("/cam0/image_raw", image_msg, timestamp)
+
+#          # cv2.imshow("img_decode", img_decode)
+#          # cv2.waitKey(1000)
+#         elif msg.format.find("mono8")!=-1:
+#           print "test"
+
+
+      
+#       #print "2"
+#       for topic, msg, t in bag_one.read_messages(topics=['/acc0']):
+#         accmsg,timestamp_acc = createAcclMessge(t,msg.vector.x, msg.vector.y,msg.vector.z)
+#         bag_w.write("/acc0", accmsg, timestamp_acc)
+
+#       #print "3"
+#       for topic, msg, t in bag_one.read_messages(topics=['/gyr0']):
+#         gyrmsg,timestamp_gyr = createGyroMessge(t,msg.vector.x,msg.vector.y, msg.vector.z)
+#         bag_w.write("/gyr0", gyrmsg, timestamp_gyr)
+
+#       bag_w.close()
+
+
+
+
+
+
